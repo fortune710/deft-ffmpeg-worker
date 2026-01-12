@@ -100,72 +100,94 @@ if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR);
 /**
  * POST /extract-audio
  * {
- *   "videoUrl": "<Supabase public URL or any video URL>",
- *   "uploadPath": "audios/audio1.mp3" // optional
+ *   "video_id": "video123"
  * }
  */
 app.post("/extract-audio", async (req, res) => {
-  const { media_url: videoUrl, upload_path: uploadPath } = req.body;
-  if (!videoUrl) return res.status(400).json({ error: "Missing videoUrl", data: null, success: false });
+  const { video_id: videoId } = req.body;
+  if (!videoId) return res.status(400).json({ error: "Missing video_id", data: null, success: false });
 
-  const videoPath = path.join(TMP_DIR, generateVideoPath(videoUrl));
-  const audioPath = path.join(TMP_DIR, generateAudioPath(videoUrl));
+  const videoStoragePath = `videos/${videoId}.mp4`;
+  const videoPath = path.join(TMP_DIR, `${videoId}.mp4`);
+  const audioPath = path.join(TMP_DIR, `${videoId}.mp3`);
+  const audioStoragePath = `audios/${videoId}.mp3`;
 
   try {
-    // 1️⃣ Download the video to TMP_DIR
-    const response = await fetch(videoUrl);
-    if (!response.ok) return res.status(500).json({ error: "Failed to fetch video", data: null, success: false });
+    // 1️⃣ Download the video from Supabase storage to TMP_DIR
+    const { data: videoData, error: downloadError } = await supabaseService.storage
+      .from(SUPABASE_STORAGE_BUCKETS.TMP_VIDEOS)
+      .download(videoStoragePath);
 
-    const videoStream = fs.createWriteStream(videoPath);
-    await new Promise((resolve, reject) => {
-      response?.body?.pipe(videoStream);
-      response.body?.on!("error", reject);
-      videoStream.on("finish", () => resolve(undefined));
-    });
+    if (downloadError) {
+      return res.status(404).json({ 
+        error: "Video not found in storage", 
+        details: downloadError.message,
+        data: null, 
+        success: false 
+      });
+    }
+
+    // Convert blob to buffer and write to file
+    const arrayBuffer = await videoData.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    fs.writeFileSync(videoPath, buffer);
 
     // 2️⃣ Extract audio using ffmpeg
     await new Promise((resolve, reject) => {
       const cmd = `ffmpeg -y -i "${videoPath}" -vn -acodec libmp3lame -q:a 2 "${audioPath}"`;
       exec(cmd, (err, stdout, stderr) => {
-        if (err) return res.status(500).json({ error: err.message, data: null, success: false });
+        if (err) {
+          // Cleanup video file on error
+          if (fs.existsSync(videoPath)) fs.unlinkSync(videoPath);
+          return reject(new Error(`FFmpeg error: ${err.message}`));
+        }
         resolve(undefined);
       });
     });
 
-    // 3️⃣ If uploadPath provided, upload to Supabase
-    if (uploadPath) {
-      const stream = fs.createReadStream(audioPath);
-      const { error: uploadError } = await supabaseService.storage
-        .from("audios")
-        .upload(uploadPath, stream, {
-          contentType: "audio/mpeg",
-          upsert: true,
-        });
-      if (uploadError) return res.status(500).json({ error: uploadError.message, data: null, success: false });
+    // 3️⃣ Upload audio to Supabase storage
+    const audioStream = fs.createReadStream(audioPath);
+    const { error: uploadError } = await supabaseService.storage
+      .from(SUPABASE_STORAGE_BUCKETS.TMP_VIDEOS)
+      .upload(audioStoragePath, audioStream, {
+        contentType: "audio/mpeg",
+        upsert: true,
+      });
 
-      // Cleanup
-      fs.unlinkSync(videoPath);
-      fs.unlinkSync(audioPath);
+    // Cleanup temporary files
+    if (fs.existsSync(videoPath)) fs.unlinkSync(videoPath);
+    if (fs.existsSync(audioPath)) fs.unlinkSync(audioPath);
 
-      return res.json({
-        data: { audio_path: uploadPath, video_path: videoPath, url: `${process.env.SUPABASE_URL}/storage/v1/object/public/audios/${uploadPath}` },
-        success: true,
-        message: "Audio extracted and uploaded",
+    if (uploadError) {
+      return res.status(500).json({ 
+        error: uploadError.message, 
+        data: null, 
+        success: false 
       });
     }
 
-    // 4️⃣ Otherwise, stream audio back to client
-    res.setHeader("Content-Type", "audio/mpeg");
-    const audioStream = fs.createReadStream(audioPath);
-    audioStream.pipe(res);
+    const audioUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/${SUPABASE_STORAGE_BUCKETS.TMP_VIDEOS}/${audioStoragePath}`;
 
-    audioStream.on("end", () => {
-      fs.unlinkSync(videoPath);
-      fs.unlinkSync(audioPath);
+    return res.json({
+      data: { 
+        audio_path: audioStoragePath, 
+        audio_url: audioUrl,
+        video_id: videoId
+      },
+      success: true,
+      message: "Audio extracted and uploaded successfully",
     });
   } catch (err: any) {
+    // Cleanup on error
+    if (fs.existsSync(videoPath)) fs.unlinkSync(videoPath);
+    if (fs.existsSync(audioPath)) fs.unlinkSync(audioPath);
+    
     console.error(err);
-    return res.status(500).json({ error: err.message });
+    return res.status(500).json({ 
+      error: err.message || "Internal server error",
+      data: null,
+      success: false
+    });
   }
 });
 
