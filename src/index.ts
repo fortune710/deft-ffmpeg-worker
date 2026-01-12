@@ -1,7 +1,7 @@
 import express, { Request, Response } from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import { createClient } from './lib/supabase';
+import { createClient, createServiceClient } from './lib/supabase';
 import { exec } from "child_process";
 import fs from "fs";
 import path from "path";
@@ -18,8 +18,9 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// Initialize Supabase client
+// Initialize Supabase clients
 const supabase = createClient();
+const supabaseService = createServiceClient();
 
 // Health check endpoint
 app.get('/health', (req: Request, res: Response) => {
@@ -76,7 +77,7 @@ app.post("/download", async (req, res) => {
     const stream = fs.createReadStream(outputFile);
     const videoPath = `videos/${videoId}.mp4`;
 
-    const { error: uploadError } = await supabase.storage
+    const { error: uploadError } = await supabaseService.storage
       .from(SUPABASE_STORAGE_BUCKETS.TMP_VIDEOS)
       .upload(videoPath, stream, {
         contentType: "video/mp4",
@@ -134,7 +135,7 @@ app.post("/extract-audio", async (req, res) => {
     // 3️⃣ If uploadPath provided, upload to Supabase
     if (uploadPath) {
       const stream = fs.createReadStream(audioPath);
-      const { error: uploadError } = await supabase.storage
+      const { error: uploadError } = await supabaseService.storage
         .from("audios")
         .upload(uploadPath, stream, {
           contentType: "audio/mpeg",
