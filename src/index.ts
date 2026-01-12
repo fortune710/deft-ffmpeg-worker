@@ -74,7 +74,7 @@ app.post("/download", async (req, res) => {
     }
 
     const stream = fs.createReadStream(outputFile);
-    const videoPath = "videos/" + {videoId} + ".mp4";
+    const videoPath = `videos/${videoId}.mp4`;
 
     const { error: uploadError } = await supabase.storage
       .from(SUPABASE_STORAGE_BUCKETS.TMP_VIDEOS)
