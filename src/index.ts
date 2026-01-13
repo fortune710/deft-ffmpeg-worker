@@ -7,6 +7,15 @@ import fs from "fs";
 import path from "path";
 import fetch from "node-fetch";
 import { generateAudioPath, generateVideoPath, SUPABASE_STORAGE_BUCKETS } from './utils/upload';
+import {
+  downloadVideoFromSupabase,
+  extractAudioFromVideo,
+  extractThumbnailFromVideo,
+  saveAudioToSupabase,
+  saveThumbnailToSupabase,
+  writeBlobToFile,
+  cleanupFiles,
+} from './utils/videoProcessing';
 
 // Load environment variables
 dotenv.config();
@@ -107,66 +116,22 @@ app.post("/extract-audio", async (req, res) => {
   const { video_id: videoId } = req.body;
   if (!videoId) return res.status(400).json({ error: "Missing video_id", data: null, success: false });
 
-  const videoStoragePath = `videos/${videoId}.mp4`;
   const videoPath = path.join(TMP_DIR, `${videoId}.mp4`);
-  const audioPath = path.join(TMP_DIR, `${videoId}.mp3`);
-  const audioStoragePath = `audios/${videoId}.mp3`;
+  let audioPath: string | null = null;
 
   try {
-    // 1️⃣ Download the video from Supabase storage to TMP_DIR
-    const { data: videoData, error: downloadError } = await supabaseService.storage
-      .from(SUPABASE_STORAGE_BUCKETS.TMP_VIDEOS)
-      .download(videoStoragePath);
-
-    if (downloadError) {
-      return res.status(404).json({ 
-        error: "Video not found in storage", 
-        details: downloadError.message,
-        data: null, 
-        success: false 
-      });
-    }
-
-    // Convert blob to buffer and write to file
-    const arrayBuffer = await videoData.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-    fs.writeFileSync(videoPath, buffer);
+    // 1️⃣ Download the video from Supabase storage
+    const videoBlob = await downloadVideoFromSupabase(videoId);
+    await writeBlobToFile(videoBlob, videoPath);
 
     // 2️⃣ Extract audio using ffmpeg
-    await new Promise((resolve, reject) => {
-      const cmd = `ffmpeg -y -i "${videoPath}" -vn -acodec libmp3lame -q:a 2 "${audioPath}"`;
-      exec(cmd, (err, stdout, stderr) => {
-        if (err) {
-          // Cleanup video file on error
-          if (fs.existsSync(videoPath)) fs.unlinkSync(videoPath);
-          return reject(new Error(`FFmpeg error: ${err.message}`));
-        }
-        resolve(undefined);
-      });
-    });
+    audioPath = await extractAudioFromVideo(videoPath, videoId);
 
     // 3️⃣ Upload audio to Supabase storage
-    const audioStream = fs.createReadStream(audioPath);
-    const { error: uploadError } = await supabaseService.storage
-      .from(SUPABASE_STORAGE_BUCKETS.TMP_VIDEOS)
-      .upload(audioStoragePath, audioStream, {
-        contentType: "audio/mpeg",
-        upsert: true,
-      });
+    const { path: audioStoragePath, url: audioUrl } = await saveAudioToSupabase(audioPath, videoId);
 
     // Cleanup temporary files
-    if (fs.existsSync(videoPath)) fs.unlinkSync(videoPath);
-    if (fs.existsSync(audioPath)) fs.unlinkSync(audioPath);
-
-    if (uploadError) {
-      return res.status(500).json({ 
-        error: uploadError.message, 
-        data: null, 
-        success: false 
-      });
-    }
-
-    const audioUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/${SUPABASE_STORAGE_BUCKETS.TMP_VIDEOS}/${audioStoragePath}`;
+    cleanupFiles(videoPath, audioPath);
 
     return res.json({
       data: { 
@@ -179,8 +144,88 @@ app.post("/extract-audio", async (req, res) => {
     });
   } catch (err: any) {
     // Cleanup on error
-    if (fs.existsSync(videoPath)) fs.unlinkSync(videoPath);
-    if (fs.existsSync(audioPath)) fs.unlinkSync(audioPath);
+    cleanupFiles(videoPath, audioPath || "");
+    
+    console.error(err);
+    return res.status(500).json({ 
+      error: err.message || "Internal server error",
+      data: null,
+      success: false
+    });
+  }
+});
+
+/**
+ * POST /extract?audio=true&thumbnail=true
+ * Body: { "video_id": "video123" }
+ * Query params:
+ *   - audio: boolean (default: false) - extract audio
+ *   - thumbnail: boolean (default: false) - extract thumbnail
+ */
+app.post("/extract", async (req, res) => {
+  const { video_id: videoId } = req.body;
+  if (!videoId) {
+    return res.status(400).json({ 
+      error: "Missing video_id", 
+      data: null, 
+      success: false 
+    });
+  }
+
+  // Parse query params as booleans
+  const audioParam = Array.isArray(req.query.audio) ? req.query.audio[0] : req.query.audio;
+  const thumbnailParam = Array.isArray(req.query.thumbnail) ? req.query.thumbnail[0] : req.query.thumbnail;
+  const extractAudio = typeof audioParam === 'string' && audioParam === 'true';
+  const extractThumbnail = typeof thumbnailParam === 'string' && thumbnailParam === 'true';
+
+  if (!extractAudio && !extractThumbnail) {
+    return res.status(400).json({ 
+      error: "At least one of 'audio' or 'thumbnail' query params must be true", 
+      data: null, 
+      success: false 
+    });
+  }
+
+  const videoPath = path.join(TMP_DIR, `${videoId}.mp4`);
+  let audioPath: string | null = null;
+  let thumbnailPath: string | null = null;
+
+  try {
+    // 1️⃣ Download the video from Supabase storage
+    const videoBlob = await downloadVideoFromSupabase(videoId);
+    await writeBlobToFile(videoBlob, videoPath);
+
+    const results: any = {
+      video_id: videoId,
+    };
+
+    // 2️⃣ Extract audio if requested
+    if (extractAudio) {
+      audioPath = await extractAudioFromVideo(videoPath, videoId);
+      const { path: audioStoragePath, url: audioUrl } = await saveAudioToSupabase(audioPath, videoId);
+      results.audio_path = audioStoragePath;
+      results.audio_url = audioUrl;
+    }
+
+    // 3️⃣ Extract thumbnail if requested
+    if (extractThumbnail) {
+      thumbnailPath = await extractThumbnailFromVideo(videoPath, videoId);
+      const { path: thumbnailStoragePath, url: thumbnailUrl } = await saveThumbnailToSupabase(thumbnailPath, videoId);
+      results.thumbnail_path = thumbnailStoragePath;
+      results.thumbnail_url = thumbnailUrl;
+    }
+
+    // Cleanup temporary files
+    cleanupFiles(videoPath, audioPath || "", thumbnailPath || "");
+
+    return res.json({
+      data: results,
+      success: true,
+      message: "Extraction completed successfully",
+    });
+  } catch (err: any) {
+    // Cleanup on error
+    cleanupFiles(videoPath, audioPath || "", thumbnailPath || "");
     
     console.error(err);
     return res.status(500).json({ 
