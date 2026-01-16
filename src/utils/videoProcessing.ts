@@ -56,7 +56,7 @@ export async function extractThumbnailFromVideo(videoPath: string, videoId: stri
   const thumbnailPath = path.join(TMP_DIR, `${videoId}.jpg`);
   
   // Extract thumbnail at 1 second into the video
-  const cmd = `ffmpeg -y -i "${videoPath}" -ss 00:00:01 -vframes 1 -q:v 2 "${thumbnailPath}"`;
+  const cmd = `ffmpeg -y -i "${videoPath}" -ss 00:00:00 -vframes 1 -q:v 2 "${thumbnailPath}"`;
   
   try {
     await execAsync(cmd);
@@ -112,7 +112,7 @@ export async function saveThumbnailToSupabase(thumbnailPath: string, videoId: st
     throw new Error(`Failed to upload thumbnail: ${uploadError.message}`);
   }
 
-  const thumbnailUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/${SUPABASE_STORAGE_BUCKETS.TMP_VIDEOS}/${thumbnailStoragePath}`;
+  const { data: { publicUrl: thumbnailUrl } } = supabaseService.storage.from(SUPABASE_STORAGE_BUCKETS.TMP_VIDEOS).getPublicUrl(thumbnailStoragePath);
   
   return {
     path: thumbnailStoragePath,
