@@ -6,7 +6,7 @@ import { SUPABASE_STORAGE_BUCKETS } from "./upload";
 import { promisify } from "util";
 
 const execAsync = promisify(exec);
-const supabaseService = createServiceClient();
+
 
 const TMP_DIR = "/tmp";
 
@@ -15,7 +15,7 @@ const TMP_DIR = "/tmp";
  */
 export async function downloadVideoFromSupabase(videoId: string): Promise<Blob> {
   const videoStoragePath = `videos/${videoId}.mp4`;
-  
+  const supabaseService = createServiceClient();
   const { data: videoData, error: downloadError } = await supabaseService.storage
     .from(SUPABASE_STORAGE_BUCKETS.TMP_VIDEOS)
     .download(videoStoragePath);
@@ -73,7 +73,8 @@ export async function extractThumbnailFromVideo(videoPath: string, videoId: stri
 export async function saveAudioToSupabase(audioPath: string, videoId: string): Promise<{ path: string; url: string }> {
   const audioStoragePath = `audios/${videoId}.mp3`;
   const audioStream = fs.createReadStream(audioPath);
-  
+
+  const supabaseService = createServiceClient();
   const { error: uploadError } = await supabaseService.storage
     .from(SUPABASE_STORAGE_BUCKETS.TMP_VIDEOS)
     .upload(audioStoragePath, audioStream, {
@@ -101,6 +102,7 @@ export async function saveThumbnailToSupabase(thumbnailPath: string, videoId: st
   const thumbnailStoragePath = `thumbnails/${videoId}.jpg`;
   const thumbnailStream = fs.createReadStream(thumbnailPath);
   
+  const supabaseService = createServiceClient();
   const { error: uploadError } = await supabaseService.storage
     .from(SUPABASE_STORAGE_BUCKETS.TMP_VIDEOS)
     .upload(thumbnailStoragePath, thumbnailStream, {
